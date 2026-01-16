@@ -12,7 +12,7 @@ Inspired by:
 
 | Model | Params | Resolution | Top-1 (IN1k) | Latency* |
 |-------|--------|------------|--------------|----------|
-| ConvMLPAttn | 4.02M | 224 | 74.2% | 9ms |
+| ConvMLPAttn | 4.02M | 224 | 74.2% | 9.06ms |
 
 ## Architecture
 
