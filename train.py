@@ -184,7 +184,7 @@ class Trainer:
 
         # Load prev training state if checkpoint_dir is provided
         self.start_epoch = 0
-        self.training_history = {'val_loss': [], 'val_acc': [], 'train_loss': []}
+        self.training_history = {'val_loss': [], 'val_acc': [], 'val_top5': [], 'train_loss': []}
 
         if checkpoint_dir:
             self.accelerator.load_state(checkpoint_dir)
@@ -196,20 +196,27 @@ class Trainer:
                     self.start_epoch = metadata.get('epoch', 0) + 1  # Resume from next epoch
                     self.best_val_loss = metadata.get('best_val_loss', float('inf'))
                     self.best_val_acc = metadata.get('best_val_acc', 0.0)
-                    self.training_history = metadata.get('history', {'val_loss': [], 'val_acc': [], 'train_loss': []})
+                    self.best_val_top5 = metadata.get('best_val_top5', 0.0)
+                    self.training_history = metadata.get(
+                        'history',
+                        {'val_loss': [], 'val_acc': [], 'val_top5': [], 'train_loss': []}
+                    )
+                    self.training_history.setdefault('val_top5', [])
                     print(f"Loaded training state from {checkpoint_dir} (resuming from epoch {self.start_epoch})")
             else:
                 print(f"Loaded training state from {checkpoint_dir} (no metadata found, starting from epoch 0)")
                 self.best_val_loss = float('inf')
                 self.best_val_acc = 0.0
+                self.best_val_top5 = 0.0
         else:
             self.best_val_loss = float('inf')
             self.best_val_acc = 0.0
+            self.best_val_top5 = 0.0
 
         self.best_test_loss = float('inf')
         self.best_test_acc = 0.0
 
-    def save_training_log(self, epoch, train_loss, val_loss, val_acc):
+    def save_training_log(self, epoch, train_loss, val_loss, val_acc, val_top5):
         """Save training history and metadata every epoch"""
         os.makedirs(self.save_dir, exist_ok=True)
 
@@ -217,23 +224,26 @@ class Trainer:
         self.training_history['train_loss'].append(train_loss)
         self.training_history['val_loss'].append(val_loss)
         self.training_history['val_acc'].append(val_acc)
+        self.training_history['val_top5'].append(val_top5)
 
         # Save full training metadata (always updated)
         metadata = {
             'epoch': epoch,
             'best_val_loss': self.best_val_loss,
             'best_val_acc': self.best_val_acc,
+            'best_val_top5': self.best_val_top5,
             'history': self.training_history
         }
         metadata_path = os.path.join(self.save_dir, 'training_metadata.json')
         with open(metadata_path, 'w') as f:
             json.dump(metadata, f, indent=2)
 
-    def save_model_if_best(self, val_loss, val_acc=0.0):
+    def save_model_if_best(self, val_loss, val_acc=0.0, val_top5=0.0):
         """Save model checkpoint only if it's the best so far"""
         if val_loss < self.best_val_loss:
             self.best_val_loss = val_loss
             self.best_val_acc = val_acc
+            self.best_val_top5 = val_top5
             os.makedirs(self.save_dir, exist_ok=True)
 
             # save train state
@@ -285,7 +295,8 @@ class Trainer:
     def run_validation(self):
         self.model.eval()
         running_loss = 0.0
-        correct = 0
+        correct_top1 = 0
+        correct_top5 = 0
         total = 0
 
         pbar = tqdm(self.val_loader, desc="Validation", leave=False)
@@ -297,36 +308,45 @@ class Trainer:
                 loss = self.criterion(outputs, labels) 
                 running_loss += loss.item() * images.size(0)
 
-                # Compute accuracy
+                # Compute top-1 and top-5 accuracy
                 _, predicted = torch.max(outputs, 1)
-                correct += (predicted == labels).sum().item()
+                correct_top1 += (predicted == labels).sum().item()
+
+                top5 = torch.topk(outputs, k=5, dim=1).indices
+                correct_top5 += (top5 == labels.unsqueeze(1)).any(dim=1).sum().item()
+
                 total += labels.size(0)
 
                 pbar.set_postfix({'loss': loss.item()})
         
         avg_loss = running_loss / total
-        accuracy = correct / total
-        return avg_loss, accuracy
+        top1_accuracy = correct_top1 / total
+        top5_accuracy = correct_top5 / total
+        return avg_loss, top1_accuracy, top5_accuracy
 
     def run_training(self):
         for epoch in tqdm(range(self.start_epoch, self.epochs), desc="Epochs", unit="epoch"):
             train_loss = self.run_epoch(epoch)
             print(f"Training - Epoch {epoch + 1}, Loss: {train_loss:.4f}")
 
-            val_loss, val_acc = self.run_validation()
-            print(f"Validation - Accuracy: {val_acc:.4f}, Loss: {val_loss:.4f}")
+            val_loss, val_acc, val_top5 = self.run_validation()
+            print(f"Validation - Acc@1: {val_acc:.4f}, Acc@5: {val_top5:.4f}, Loss: {val_loss:.4f}")
+
+            self.best_val_acc = max(self.best_val_acc, val_acc)
+            self.best_val_top5 = max(self.best_val_top5, val_top5)
 
             # Save model checkpoint only if best (updates best_val_loss and best_val_acc)
-            self.save_model_if_best(val_loss, val_acc)
+            self.save_model_if_best(val_loss, val_acc, val_top5)
 
             # Save training log every epoch (after updating best metrics)
-            self.save_training_log(epoch, train_loss, val_loss, val_acc)
+            self.save_training_log(epoch, train_loss, val_loss, val_acc, val_top5)
 
             if self.wandb_logging:
                 wandb.log({
                     # 'train_loss': train_loss,
                     'val_loss': val_loss,
                     'val_acc': val_acc,
+                    'val_top5': val_top5,
                     'lr': self.scheduler.get_last_lr()[0],
                     'epoch': epoch
                 })
