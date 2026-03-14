@@ -8,11 +8,11 @@ Inspired by:
 
 ## Performance
 
-\* Training and latency measurement all done on an RTX 3090
+\* Training and latency measurement all done on an RTX 3090. Latency and throughput is measured with a batch size of 512
 
-| Model | Params | Resolution | Top-1 (IN1k) | Latency* |
-|-------|--------|------------|--------------|----------|
-| ConvMLPAttn | 4.02M | 224 | 74.2% | 9.06ms |
+| Model | Params | Resolution | Top-1 (IN1k) | Top-5 (IN1k) | Latency* | Throughput* |
+|-------|--------|------------|--------------|--------------|----------|-------------|
+| ConvMLPAttn | 3.81M | 224 | 75.22% | 92.29% | 9.06ms | |
 
 ## Architecture
 
