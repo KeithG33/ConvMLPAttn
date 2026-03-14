@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -78,13 +80,15 @@ class AttnGenerator2D(nn.Module):
     """
     def __init__(self, N: int, C: int, heads: int = 4, kernel_size: int = 7):
         super().__init__()
+        self.gate = nn.Parameter(torch.zeros(1, C, 1, 1))
+
         self.local_mix = nn.Sequential(
             nn.Conv2d(C, C, kernel_size=kernel_size, padding=kernel_size//2, groups=C),
             nn.GELU(),
         )
         self.global_mix = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(C, C, kernel_size=1),
+            nn.AdaptiveAvgPool2d(4),
+            nn.Conv2d(C, C, kernel_size=4, groups=C),
             nn.GELU(),
         )
         self.mix = nn.Sequential(
@@ -95,7 +99,7 @@ class AttnGenerator2D(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x_local = self.local_mix(x)
         x_global = self.global_mix(x)
-        x_combined = x_local + x_global
+        x_combined = x_local + self.gate * x_global
         logits = self.mix(x_combined)  # (B, h*N, H, W)
         return logits
 
@@ -126,7 +130,7 @@ class MLPAttn2D(nn.Module):
         )
 
         self.attn_drop = nn.Dropout(attn_dropout) if attn_dropout > 0 else nn.Identity()
-        self.logit_scale = nn.Parameter(torch.tensor(1.0))
+        self.logit_scale = nn.Parameter(torch.tensor(1.0 / math.sqrt(self.dv)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, C, H, W = x.shape
@@ -143,6 +147,7 @@ class MLPAttn2D(nn.Module):
         v = self.v_proj(x)
         v = v.view(B, self.heads, self.dv, self.N).transpose(-2, -1)  # (B, h, N, dv)
 
+        # (B, h, N, N) @ (B, h, N, dv) -> (B, h, N, dv)
         y = torch.matmul(attn, v)  # (B, h, N, dv)
         y = y.transpose(-2, -1).reshape(B, self.heads * self.dv, H, W)  # (B, C, H, W)
         return self.out_proj(y)
@@ -261,10 +266,11 @@ class MLPAttn2DNet(nn.Module):
         self.stage4 = Stage((s4, s4), C=dims[3], depth=depths[3], heads=heads[3], block_type='attn', 
                             mlp_ratio=mlp_expand)
 
-
         # Classification Head
-        self.norm_head = LayerNorm2d(C4)
-        self.head = nn.Linear(C4, num_classes)
+        self.head = nn.Sequential(
+            nn.LayerNorm(C4),
+            nn.Linear(C4, num_classes)
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.patch_embed(x)
@@ -279,8 +285,7 @@ class MLPAttn2DNet(nn.Module):
         x = self.down34(x)
         
         x = self.stage4(x)
-        x = self.norm_head(x)
-        
+
         x = F.adaptive_avg_pool2d(x, 1).flatten(1)
         return self.head(x)
 
@@ -294,17 +299,18 @@ if __name__ == "__main__":
         mlp_expand=2,
     )
 
+    BATCH_SIZE = 512
+    REPITITIONS = 100
+
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Number of parameters: {num_params / 1e6:.2f}M")
     
-    dummy_input = torch.randn(1, 3, 224, 224)
+    dummy_input = torch.randn(BATCH_SIZE, 3, 224, 224)
     with torch.no_grad():
         logits = model(dummy_input)
     print(f"Output logits shape: {logits.shape}")
 
     # benchmark speed
-    import time
-    repetitions = 100
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
     dummy_input = dummy_input.cuda().to(dtype=torch.bfloat16)
     model = model.cuda().to(dtype=torch.bfloat16)
@@ -318,11 +324,13 @@ if __name__ == "__main__":
         torch.cuda.synchronize()
         
         starter.record()
-        for _ in range(repetitions):
+        for _ in range(REPITITIONS):
             _ = model(dummy_input)
         ender.record()
 
         torch.cuda.synchronize()
-        avg_ms = starter.elapsed_time(ender) / repetitions
+        avg_ms = starter.elapsed_time(ender) / REPITITIONS
     
+    throughput = BATCH_SIZE / (avg_ms / 1000.0)  # images/sec
     print(f"Average inference time: {avg_ms:.2f} ms")
+    print(f"Throughput: {throughput:.2f} images/sec")
