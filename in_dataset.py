@@ -5,7 +5,7 @@ import torch
 class inDataset(torch.utils.data.Dataset):
     def __init__(self, dataset, train_transforms=None, val_transforms=None):
         # Load the dataset
-        self.dataset = load_dataset("imagenet-1k", split=f"{dataset}")
+        self.dataset = load_dataset("ILSVRC/imagenet-1k", split=f"{dataset}", token=True)
         self.split = dataset
 
         # Define the transformations
